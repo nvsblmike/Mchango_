@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: UNLICENSED
-pragma solidity ^0.8.9;
+pragma solidity ^0.8.17;
 
 contract Mchango {
     //!Project Events
@@ -69,7 +69,8 @@ contract Mchango {
     uint256 public exclusiveFee;
     Group[] public allGroups;
     address[] public admins;
-    mapping(address => Group) public adminToGroup;
+    address private immutable Owner;
+    mapping(address => uint256[]) adminToGroupIndexes;
     mapping(address => bool) public isPremium;
     mapping(address => bool) public isExclusive;
     mapping(address => Subscriber) public addressToSubscriber;
@@ -82,15 +83,26 @@ contract Mchango {
     constructor(uint256 _premiumFee, uint256 _exclusiveFee) {
         premiumFee = _premiumFee;
         exclusiveFee = _exclusiveFee;
+        Owner = msg.sender;
         isExclusive[msg.sender] = true;
     }
 
     //!Project Modifiers
     modifier onlyAdmin(address _groupAdmin) {
-        require(
-            _groupAdmin == adminToGroup[_groupAdmin].admin,
-            "Only group admin can perform this action"
-        );
+        bool isAdmin = false;
+        uint256[] storage groupIndexes = adminToGroupIndexes[_groupAdmin];
+        for (uint256 i = 0; i < groupIndexes.length; i++) {
+            if (allGroups[groupIndexes[i]].admin == _groupAdmin) {
+                isAdmin = true;
+                break;
+            }
+        }
+        require(isAdmin, "Only group admin can perform this action");
+        _;
+    }
+
+    modifier onlyOwner() {
+        require(msg.sender == Owner, "Only owner can call this function");
         _;
     }
 
@@ -104,17 +116,22 @@ contract Mchango {
 
     modifier groupCompliance() {
         require(
-            adminToGroup[msg.sender].admin == address(0),
+            adminToGroupIndexes[msg.sender].length == 0,
             "You have already created a group"
         );
         _;
     }
 
     modifier groupExsist(address _adminAddress) {
-        require(
-            adminToGroup[msg.sender].admin != address(0),
-            "This group does not exist"
-        );
+        bool exists = false;
+        uint256[] storage groupIndexes = adminToGroupIndexes[_adminAddress];
+        for (uint256 i = 0; i < groupIndexes.length; i++) {
+            if (allGroups[groupIndexes[i]].admin == _adminAddress) {
+                exists = true;
+                break;
+            }
+        }
+        require(exists, "This group does not exist");
         _;
     }
 
@@ -193,6 +210,14 @@ contract Mchango {
         return type(uint256).max;
     }
 
+    function setPremiumFee(uint256 _fee) external onlyOwner {
+        premiumFee = _fee;
+    }
+
+    function setExclusiveFee(uint256 _fee) external onlyOwner {
+        exclusiveFee = _fee;
+    }
+
     //! this function creates a new group
     function createGroup(
         string memory _groupDescription,
@@ -202,101 +227,115 @@ contract Mchango {
         address admin = msg.sender;
 
         Group storage newGroup = allGroups.push();
-
         newGroup.admin = admin;
         newGroup.name = _name;
+        newGroup.description = _groupDescription;
         newGroup.balance = 0;
         newGroup.contributionValue = _contributionValue;
-        newGroup.description = _groupDescription;
         newGroup.currentState = State.notStarted;
 
-        if (isSubscriberPremium(msg.sender)) {
+        if (isSubscriberPremium(admin)) {
             newGroup.groupMembers = new address[](20);
-        } else if (isSubscriberExclusive(msg.sender)) {
+        } else if (isSubscriberExclusive(admin)) {
             newGroup.groupMembers = new address[](50);
         } else {
             newGroup.groupMembers = new address[](10);
         }
 
+        uint256 groupIndex = allGroups.length - 1;
+        adminToGroupIndexes[admin].push(groupIndex);
+
+        admins.push(admin);
+
         emit hasCreatedGroup(admin, _groupDescription);
     }
 
-    function AddGroupMembers(
+    function getGroupDetails(
+        address _admin
+    )
+        external
+        view
+        groupExsist(_admin)
+        returns (
+            string memory,
+            string memory,
+            uint256,
+            address,
+            address[] memory
+        )
+    {
+        uint256 groupIndex = adminToGroupIndexes[_admin][0];
+        Group storage group = allGroups[groupIndex];
+
+        return (
+            group.name,
+            group.description,
+            group.balance,
+            group.admin,
+            group.groupMembers
+        );
+    }
+
+    function addGroupMembers(
         string memory _name,
         address _memberAddress
     ) external onlyAdmin(msg.sender) groupExsist(msg.sender) {
-        bool premium = isSubscriberPremium(msg.sender);
-        bool exclusive = isSubscriberExclusive(msg.sender);
+        Group storage group = allGroups[adminToGroupIndexes[msg.sender][0]];
 
-        Group storage group = adminToGroup[msg.sender];
-
-        if (premium) {
+        require(
+            group.currentState == State.notStarted,
+            "Cannot add members after collection has started"
+        );
+        if (isSubscriberPremium(msg.sender)) {
             require(
                 group.groupMembers.length <= 20,
-                "Premium Subscriber detected, Maximum number of members can not exceed 20"
+                "Maximum number of members reached"
             );
-
-            group.participants[_memberAddress] = Participant({
-                name: _name,
-                participantAddress: _memberAddress,
-                amountDonated: 0,
-                amountCollected: 0,
-                timeStamp: 0,
-                isBanned: false,
-                isEligble: false,
-                hasReceivedFunds: false
-            });
-
-            group.groupMembers.push(_memberAddress);
-        } else if (exclusive) {
+        } else if (isSubscriberExclusive(msg.sender)) {
             require(
                 group.groupMembers.length <= 50,
-                "Exclusive Subscriber detected, Maximum number of members can not exceed 50"
+                "Maximum number of members reached"
             );
-
-            group.participants[_memberAddress] = Participant({
-                name: _name,
-                participantAddress: _memberAddress,
-                amountDonated: 0,
-                amountCollected: 0,
-                timeStamp: 0,
-                isBanned: false,
-                isEligble: false,
-                hasReceivedFunds: false
-            });
-
-            group.groupMembers.push(_memberAddress);
         } else {
             require(
                 group.groupMembers.length <= 10,
-                "Maximum number of members can not exceed 10"
+                "Maximum number of members reached"
             );
-            group.participants[_memberAddress] = Participant({
-                name: _name,
-                participantAddress: _memberAddress,
-                amountDonated: 0,
-                amountCollected: 0,
-                timeStamp: 0,
-                isBanned: false,
-                isEligble: false,
-                hasReceivedFunds: false
-            });
-
-            group.groupMembers.push(_memberAddress);
         }
+
+        group.participants[_memberAddress] = Participant({
+            name: _name,
+            participantAddress: _memberAddress,
+            amountDonated: 0,
+            amountCollected: 0,
+            timeStamp: 0,
+            isBanned: false,
+            isEligble: false,
+            hasReceivedFunds: false
+        });
+
+        group.groupMembers.push(_memberAddress);
     }
 
     function setContributionValue(
         uint256 _value
-    ) external onlyAdmin(msg.sender) groupExsist(msg.sender) {
-        Group storage group = adminToGroup[msg.sender];
-        group.contributionValue = _value;
+    ) external onlyAdmin(msg.sender) {
+        uint256[] storage groupIndexes = adminToGroupIndexes[msg.sender];
+        require(groupIndexes.length > 0, "Group does not exist");
+
+        uint256 groupIndex = groupIndexes[groupIndexes.length - 1];
+        allGroups[groupIndex].contributionValue = _value;
     }
 
     function kickGroupMember(
         address _groupMemberAddress
     ) external onlyAdmin(msg.sender) {
-        Group storage group = adminToGroup[msg.sender];
+        uint256[] storage groupIndexes = adminToGroupIndexes[msg.sender];
+        require(groupIndexes.length > 0, "Group does not exist");
+
+        uint256 groupIndex = groupIndexes[groupIndexes.length - 1];
+        Group storage group = allGroups[groupIndex];
+
         uint256 indexToRemove = findIndexOfAddress(
             group.groupMembers,
             _groupMemberAddress
@@ -310,14 +349,20 @@ contract Mchango {
             group.groupMembers.length - 1
         ];
         group.groupMembers.pop();
+
         emit memberKicked(group.name, _groupMemberAddress);
     }
 
     function donate(address _adminAddress) external payable {
-        Group storage group = adminToGroup[_adminAddress];
+        uint256[] storage groupIndexes = adminToGroupIndexes[_adminAddress];
+        require(groupIndexes.length > 0, "Group does not exist");
+
+        uint256 groupIndex = groupIndexes[groupIndexes.length - 1];
+        Group storage group = allGroups[groupIndex];
+
         require(
             group.currentState == State.inProgress,
-            "you can only donate when the state is in progress"
+            "You can only donate when the state is in progress"
         );
         require(
             group.contributionValue != 0,
@@ -325,11 +370,11 @@ contract Mchango {
         );
         require(
             msg.value == group.contributionValue,
-            "Insufficent amount to contribute"
+            "Insufficient amount to contribute"
         );
 
-        (bool sucess, ) = payable(address(this)).call{value: msg.value}("");
-        require(sucess, "This transaction failed");
+        (bool success, ) = payable(address(this)).call{value: msg.value}("");
+        require(success, "This transaction failed");
 
         group.balance += msg.value;
         group.participants[msg.sender].amountDonated += msg.value;
@@ -339,30 +384,13 @@ contract Mchango {
         emit hasDonated(msg.sender, msg.value);
     }
 
-    function donate(address _groupAdmin, uint256 _amount) external {
-        Group storage group = adminToGroup[_groupAdmin];
-        require(group.admin != address(0), "Group does not exist");
-        require(
-            group.currentState == State.inProgress,
-            "Group is not in progress"
-        );
-        require(
-            !group.participants[msg.sender].isBanned,
-            "You are banned from this group"
-        );
+    function startCollection() external onlyAdmin(msg.sender) {
+        uint256[] storage groupIndexes = adminToGroupIndexes[msg.sender];
+        require(groupIndexes.length > 0, "Group does not exist");
 
-        group.participants[msg.sender].amountDonated += _amount;
-        group.balance += _amount;
-        emit hasDonated(msg.sender, _amount);
-    }
+        uint256 groupIndex = groupIndexes[groupIndexes.length - 1];
+        Group storage group = allGroups[groupIndex];
 
-    function startCollection()
-        external
-        onlyAdmin(msg.sender)
-        onlyAdmin(msg.sender)
-        groupExsist(msg.sender)
-    {
-        Group storage group = adminToGroup[msg.sender];
         require(
             group.currentState == State.notStarted,
             "Collection has already started"
@@ -371,15 +399,16 @@ contract Mchango {
         group.currentState = State.inProgress;
     }
 
-    function endCollection()
-        external
-        onlyAdmin(msg.sender)
-        groupExsist(msg.sender)
-    {
-        Group storage group = adminToGroup[msg.sender];
+    function endCollection() external onlyAdmin(msg.sender) {
+        uint256[] storage groupIndexes = adminToGroupIndexes[msg.sender];
+        require(groupIndexes.length > 0, "Group does not exist");
+
+        uint256 groupIndex = groupIndexes[groupIndexes.length - 1];
+        Group storage group = allGroups[groupIndex];
+
         require(
             group.currentState == State.inProgress,
-            "Collection has already started"
+            "Collection has not started"
         );
 
         group.currentState = State.completed;
@@ -387,8 +416,13 @@ contract Mchango {
 
     function releaseCollection(
         address _receiver
-    ) external onlyAdmin(msg.sender) groupExsist(msg.sender) {
-        Group storage group = adminToGroup[msg.sender];
+    ) external onlyAdmin(msg.sender) {
+        uint256[] storage groupIndexes = adminToGroupIndexes[msg.sender];
+        require(groupIndexes.length > 0, "Group does not exist");
+
+        uint256 groupIndex = groupIndexes[groupIndexes.length - 1];
+        Group storage group = allGroups[groupIndex];
+
         require(
             group.currentState == State.completed,
             "Can not release collection while donation is still in progress"
@@ -407,7 +441,7 @@ contract Mchango {
 
         if (isSubscriberPremium(msg.sender)) {
             coolDown = 6 days;
-            uint256 premiumDeduction = (amountToReceive * 2) / 1000;
+            uint256 premiumDeduction = (amountToReceive * 15) / 1000;
             amountToReceive -= premiumDeduction;
         } else if (isSubscriberExclusive(msg.sender)) {
             coolDown = 6 days;
@@ -419,10 +453,9 @@ contract Mchango {
 
         require(amountToReceive > 0, "No funds to release");
 
-        // Enforce cooldown period for eligible participants
         require(
             receiver.timeStamp == 0 ||
-                receiver.timeStamp + coolDown < block.timestamp,
+                block.timestamp > receiver.timeStamp + coolDown,
             "You are still in a cooldown period"
         );
 
@@ -453,7 +486,12 @@ contract Mchango {
     }
 
     function resetEligibility() external onlyAdmin(msg.sender) {
-        Group storage group = adminToGroup[msg.sender];
+        uint256[] storage groupIndexes = adminToGroupIndexes[msg.sender];
+        require(groupIndexes.length > 0, "Group does not exist");
+
+        uint256 groupIndex = groupIndexes[groupIndexes.length - 1];
+        Group storage group = allGroups[groupIndex];
+
         require(
             group.currentState == State.inProgress,
             "Donation period not in progress"
@@ -467,12 +505,15 @@ contract Mchango {
     }
 
     function moderateParticipant(
-        address _groupAdmin,
         address _participant,
         bool _verdict
-    ) external onlyAdmin(_groupAdmin) {
-        Group storage group = adminToGroup[_groupAdmin];
-        require(group.admin != address(0), "Group does not exist");
+    ) external onlyAdmin(msg.sender) {
+        uint256[] storage groupIndexes = adminToGroupIndexes[msg.sender];
+        require(groupIndexes.length > 0, "Group does not exist");
+
+        uint256 groupIndex = groupIndexes[groupIndexes.length - 1];
+        Group storage group = allGroups[groupIndex];
+
         require(
             group.currentState == State.notStarted,
             "Group is not in join state"
@@ -482,4 +523,6 @@ contract Mchango {
 
         emit participantVerdicit(_verdict, _participant);
     }
+
+    receive() external payable {}
 }
