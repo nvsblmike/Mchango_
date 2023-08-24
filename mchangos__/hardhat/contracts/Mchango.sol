@@ -407,7 +407,7 @@ contract Mchango {
 
         if (isSubscriberPremium(msg.sender)) {
             coolDown = 6 days;
-            uint256 premiumDeduction = (amountToReceive * 15) / 1000;
+            uint256 premiumDeduction = (amountToReceive * 2) / 1000;
             amountToReceive -= premiumDeduction;
         } else if (isSubscriberExclusive(msg.sender)) {
             coolDown = 6 days;
